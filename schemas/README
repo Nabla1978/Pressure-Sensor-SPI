@@ -1,0 +1,7 @@
+- As Intersema's sensor modules haven't any high-Z driver on DOUT, it is compulsory to add a 3-state buffer on the line between DOUT and MISO-line of the SPI bus in order to allow communication with the other slaves.
+
+- The lines MISO, MOSI and SCL have to be connected on the right ports of the microcontroller (See microcontroller datasheet). 
+
+- The CSx lines can be connected to general digital I/O.
+
+- Most components using SPI have an active-low input (CS\) to select it. Using a 74HC1G125 has the same meaning because this driver has an Output-Enable active-low input(OE\).

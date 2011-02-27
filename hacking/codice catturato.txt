@@ -1,0 +1,315 @@
+R Servo Range finder
+
+A Sharp infrared proximity sensor mounted on a servo
+that moves back and forth, scanning the area.
+*/
+#define USE_COMPASS
+#define USE_ACCELERO
+//#define USE_BARO
+//#define USE_MEASMOTOR
+#define USE_RANGE_SCANNER
+
+
+#include <Servo.h>
+#include <Wire.h>
+#include "RangeScanner.h"
+#ifdef USE_BARO
+  #include "IntersemaBaro.h"
+  #include "cppfix.h"
+#endif
+
+static const size_t pinIRDist     =   3; // analog
+static const size_t pinLED	  =  11; // needs to be PWM
+static const size_t pinServo	=   5; // needs to be PWM
+static const size_t pinSensorPwr  =   2; // power for compass, accelerometer and barometer
+static const size_t pinMotorUpper =  12;
+static const size_t pinMotorLower =   8;
+static const size_t pinBaroSCLK   =   6;
+static const size_t pinBaroDOUT   =   4; // in  on the arduino
+static const size_t pinBaroDIN    =   9; // out on the arduino
+static const size_t pinBaroMCLK   =   3; // the tone function used to generate the 34kHz signal interferes with pin 3 and 11, so it's best to use it directly
+static const int    addrCompas    = (0x42 >> 1);
+static const int    addrNunchuck  =  0x52;
+
+#ifdef USE_RANGE_SCANNER
+  RangeScanner  rangescn(pinIRDist, pinServo);
+#endif
+#ifdef USE_BARO
+  Intersema::BaroPressure_MS5534C *baro = 0;
+#endif
+bool	    doSendSerial = false;
+bool	    doSweepServo = false;
+size_t	  loopDelay    = 25;
+char	    tmptxt[128];
+
+size_t readSerialString(char *txt, size_t bufsize);
+void   evalCmdStr(char *txt);
+
+void setup()
+{
+    pinMode(pinSensorPwr, OUTPUT);
+    digitalWrite(pinSensorPwr, LOW);
+    delay(200);
+    digitalWrite(pinSensorPwr, HIGH);
+    delay(200);
+#ifdef USE_MEASMOTOR
+    pinMode(pinMotorUpper, INPUT);
+    pinMode(pinMotorLower, INPUT);
+#endif
+    Serial.begin(115200); // arduino bt has only this baud rate
+    Wire.begin();  // join i2c bus as master
+#ifdef USE_RANGE_SCANNER
+    rangescn.setStepAngle(5);
+    rangescn.setScanningRange(160);
+    rangescn.moveToIdlePos();
+#endif
+#ifdef USE_ACCELERO
+    Wire.beginTransmission(addrNunchuck);// transmit to device 0x52
+    Wire.send(0x40);// sends memory address
+    Wire.send(0x00);// sends a zero, requesting the first data
+    Wire.endTransmission();// stop transmitting    delay(100);
+#endif
+#ifdef USE_BARO
+    baro     = new Intersema::BaroPressure_MS5534C(pinBaroMCLK, pinBaroSCLK, pinBaroDIN, pinBaroDOUT);
+#endif
+}
+
+void loop()
+{
+#ifdef USE_RANGE_SCANNER
+    const int proximityAngle = rangescn.curr_pos();
+    const int proximityValue = rangescn.raw_measure();
+    if(doSweepServo)
+	  rangescn.moveNextPos(); // move to the next scan position
+#endif
+
+#ifdef USE_ACCELERO
+    Wire.requestFrom(addrNunchuck, 6);
+    int cnt=0;
+    uint8_t buf[6];
+    while(Wire.available() && cnt < 6)
+    {
+	  char cc = Wire.receive();
+	  cc = (cc ^ 0x17) + 0x17;
+	  buf[cnt++] = cc;
+    }
+
+    int accelX = buf[2];
+    accelX *= 4;
+    if((buf[5] >> 2) & 1)
+	  accelX += 2;
+    if((buf[5] >> 3) & 1)
+	  accelX += 1;
+    int accelY = buf[3];
+    accelY *= 4;
+    if((buf[5] >> 4) & 1)
+	  accelY += 2;
+    if((buf[5] >> 5) & 1)
+	  accelY += 1;
+    int accelZ = buf[4];
+    accelZ *= 4;
+    if((buf[5] >> 6) & 1)
+	  accelZ += 2;
+    if((buf[5] >> 7) & 1)
+	  accelZ += 1;
+#endif
+
+#ifdef USE_COMPASS
+    Wire.beginTransmission(addrCompas);
+    Wire.send('A');  // command sensor to measure angle
+    Wire.endTransmission();
+
+    // step 2: wait for readings to happen
+    delay(10);				// datasheet suggests at least 6000 microseconds
+
+    // step 3: request reading from sensor
+    Wire.requestFrom(addrCompas, 2);	 // request 2 bytes from slave device #33
+
+    // step 4: receive reading from sensor
+    int compassHeading = 0;
+    if(Wire.available() >= 2)	   // if two bytes were received
+    {
+	  compassHeading = Wire.receive(); // receive high byte (overwrites previous reading)
+	  compassHeading = compassHeading << 8;	 // shift high byte to be high 8 bits
+	  compassHeading += Wire.receive();    // receive low byte as lower 8 bits
+	  compassHeading /= 10;
+	  compassHeading -= 90;  // mounting position on the board
+	  while(compassHeading < 0)
+		compassHeading += 360;
+	  while(compassHeading > 360)
+		compassHeading -= 360;
+    }
+#endif
+
+#ifdef USE_BARO
+    const int altitude = baro->getHeightCentiMeters();
+#endif
+
+#ifdef USE_MEASMOTOR
+    const size_t motorInUpper = pulseIn(pinMotorUpper, HIGH, 500);
+    const size_t motorInLower = pulseIn(pinMotorLower, HIGH, 500);
+#endif
+
+#ifdef USE_ACCELERO
+    Wire.beginTransmission(addrNunchuck);// transmit to device 0x52
+    Wire.send(0x00);// sends one byte
+    Wire.endTransmission();// stop transmitting
+#endif
+
+#ifdef USE_RANGE_SCANNER
+    const int outputValue = map(proximityValue, 50, 700, 0, 255);
+    analogWrite(pinLED, outputValue);
+#endif
+
+    if(readSerialString(tmptxt, sizeof(tmptxt)))
+	  evalCmdStr(tmptxt);
+
+    if(doSendSerial)
+    {
+#ifdef USE_RANGE_SCANNER
+	  sprintf(tmptxt, "RA%dRV%d", proximityAngle, proximityValue);
+	  Serial.print(tmptxt);
+#endif
+#ifdef USE_ACCELERO
+	  sprintf(tmptxt, "AX%dAY%dAZ%d", accelX, accelY, accelZ);
+	  Serial.print(tmptxt);
+#endif
+#ifdef USE_COMPASS
+	  sprintf(tmptxt, "CH%d", compassHeading);
+	  Serial.print(tmptxt);
+#endif
+#ifdef USE_BARO
+	  sprintf(tmptxt, "BH%d", altitude);
+	  Serial.print(tmptxt);
+#endif
+#ifdef USE_MEASMOTOR
+	  sprintf(tmptxt, "MU%dML%d", motorInUpper, motorInLower);
+	  Serial.print(tmptxt);
+#endif
+	  Serial.print("\n");
+    }
+
+    delay(loopDelay);
+
+}
+
+size_t readSerialString(char *txt, size_t bufsize)
+{
+    if(!Serial.available())
+	  return 0;
+
+    delay(10);  // wait a little for serial data
+
+    memset(txt, 0, bufsize); // set it all to zero
+    size_t i = 0;
+    size_t waitCycles = 0;
+    while(i < bufsize)
+    {
+	  if(Serial.available())
+	  {
+		char cc = Serial.read();
+		if(cc == '\n' || cc == '\0')
+		    break;
+		txt[i++] = cc;
+	  }
+	  else if(waitCycles++ > 20)
+		break;
+	  else
+		delay(10);
+    }
+    txt[min(i, bufsize-1)] = '\0';  // terminate the string
+
+    return i;  // return number of chars read
+}
+
+void evalCmdStr(char *txt)
+{
+    if(!strcmp(txt, "lon"))
+	  doSendSerial = true;
+    else if(!strcmp(txt, "loff"))
+	  doSendSerial = false;
+#ifdef USE_RANGE_SCANNER
+    else if(!strcmp(txt, "swon"))
+	  doSweepServo = true;
+    else if(!strcmp(txt, "swoff"))
+    {
+	  doSweepServo = false;
+	  rangescn.moveToIdlePos();
+    }
+    else if(!strncmp(txt, "swst", 4))
+	  rangescn.setStepAngle(atoi(txt + 4));
+    else if(!strncmp(txt, "swrg", 4))
+	  rangescn.setScanningRange(atoi(txt + 4));
+#endif
+    else if(!strncmp(txt, "lode", 4))
+    {
+	  int newval = atoi(txt + 4);
+	  if(newval >= 10 && newval <= 1000)
+		loopDelay = newval;
+    }
+    else
+    {
+	  static const char helpstr[] =
+		"\nIrServoRangeScanner\n"
+		"'lon' start sending serial data\n"
+		"'loff stop' stop sending serial data\n"
+		"'swon' start moving the servo with the ir proximity sensor\n"
+		"'swoff' stop moving the servo with the ir proximity sensor\n"
+		"'swst<nn>' angle degrees per step\n"
+		"'swrg<nn>' scanning range\n"
+		"'lode<nn>' milliseconds to sleep on every loop\n"
+		"'?'  for this help msg\n\n"
+		;
+	  Serial.print(helpstr);
+
+	  if(strlen(txt) && strcmp(txt, "?"))
+	  {
+		Serial.print("Invalid option: \"");
+		Serial.print(txt);
+		Serial.println("\"");
+	  }
+    }
+}
+  
+
+
+
+RangeScanner.h
+Code:
+#ifndef RANGE_SCANNER_H
+#define RANGE_SCANNER_H
+
+#include <Servo.h>
+#include <WProgram.h>
+
+class RangeScanner
+{
+public:
+    RangeScanner(size_t pinIrDist, size_t pinServo);
+
+    int curr_pos() const { return servoPosDeg_; }
+    size_t raw_measure() const;
+    size_t distance_cm() const;
+
+    void moveNextPos();
+    void moveToIdlePos();
+    void setIdlePos(const int idlePosDeg);
+    void setStepAngle(const size_t newStepDeg);
+    void setScanningRange(const int deg);
+    void setScanningRange(const int minPosDeg, const int maxPosDeg);
+
+private:
+    Servo myservo_;
+    const size_t pinIrDist_;
+    const size_t pinServo_;
+    int servoMinPosDeg_;
+    int servoMaxPosDeg_;
+    int servoIdelPosDeg_;
+    int servoStepDeg_;
+    int servoPosDeg_;
+    bool   turnClockwise_;
+
+};
+
+#endif // RANGE_SCANNER_H
+ 
