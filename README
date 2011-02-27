@@ -1,4 +1,12 @@
-This is a library for a Pressure Sensor SPI-based for the Maple (http://leaflabs.com/devices/maple/). 
+This is a library for a Pressure Sensor SPI-based for the Maple (http://leaflabs.com/devices/maple/).
+The Pressure Sensor that will be used for development is from Intersema (http://www.intersema.ch/) 
+More in detail, the models that should be used are:
+
+MS5535-C / MS5535-CM / MS5535-30C
+MS5541-C / MS5541-CM / MS5541-30C
+Differences are in pressure rating, pin dimensions and gel insulation, but SPI communication is exactly the same.
+At the moment Intersema had introduced a new model 5803-xxBA, that should be not compatible with the following library.
+
 
 Since this is my first library, i'm copying almost everything from other repos :-)
 
